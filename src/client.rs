@@ -69,10 +69,7 @@ impl GeminiClient {
             self.ui_tx.send(UiEvent::AppendMessage(self.config.user_name.clone(), text.to_string())).await?;
         }
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
-            self.api_key
-        );
+        let url = self.config.api_url.replace("{}", &self.api_key);
 
         let system_prompt_text = format!(
             "Your name is {}. The user's name is {}. Your vibe and core instruction is: {}.",

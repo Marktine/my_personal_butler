@@ -35,7 +35,13 @@ async fn main() -> Result<(), AnyError> {
         }
     };
 
-    let config = load_or_prompt_config();
+    let config = {
+        let mut c = load_or_prompt_config();
+        if let Ok(url) = env::var("GEMINI_API_URL") {
+            c.api_url = url;
+        }
+        c
+    };
 
     // Setup channels
     let (ui_tx, ui_rx) = mpsc::channel(100);

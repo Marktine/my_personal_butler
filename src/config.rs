@@ -11,6 +11,10 @@ fn default_request_limit() -> usize {
     1_500
 }
 
+fn default_api_url() -> String {
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}".to_string()
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ButlerConfig {
     pub user_name: String,
@@ -24,6 +28,8 @@ pub struct ButlerConfig {
     pub requests_made: usize,
     #[serde(default = "default_request_limit")]
     pub request_limit: usize,
+    #[serde(default = "default_api_url")]
+    pub api_url: String,
 }
 
 fn get_config_path() -> PathBuf {
@@ -84,6 +90,7 @@ pub fn load_or_prompt_config() -> ButlerConfig {
         token_limit: default_token_limit(),
         requests_made: 0,
         request_limit: default_request_limit(),
+        api_url: default_api_url(),
     };
 
     save_config(&config);
