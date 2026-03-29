@@ -5,13 +5,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, List, ListItem},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use crate::config::ButlerConfig;
-use crate::utils::format_with_commas;
+use crate::utils::{format_with_commas, wrap_text};
 
 pub enum UiEvent {
     AppendMessage(String, String), // role, text
@@ -194,23 +194,36 @@ impl App {
     }
 
     fn ui(&self, f: &mut ratatui::Frame) {
+        let area = f.area();
+
+        // Calculate heights dynamically for a fluid layout
         let input_height = match &self.state {
-            AppState::WaitingForTool { .. } => 6,
-            AppState::Normal => 3,
+            AppState::WaitingForTool { cmd, .. } => {
+                let cmd_width = area.width.saturating_sub(6) as usize;
+                let cmd_lines = wrap_text(cmd, cmd_width).len();
+                (cmd_lines as u16 + 6).min(15) // Content lines + padding + borders
+            }
+            AppState::Normal => {
+                let text_width = area.width.saturating_sub(4) as usize;
+                let text_lines = wrap_text(self.input.value(), text_width).len();
+                (text_lines as u16 + 2).min(10).max(3)
+            }
         };
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Min(0),               // Messages list
+                Constraint::Min(0),               // Messages area
                 Constraint::Length(1),            // Divider / Status
                 Constraint::Length(input_height), // Input or Tool Confirmation
             ])
-            .split(f.area());
+            .split(area);
 
-        // Messages
-        let mut list_items = Vec::new();
+        // -- Messages rendering --
+        let mut message_elements = Vec::new();
+        let msg_width = chunks[0].width.saturating_sub(6) as usize;
+
         for (role, msg) in &self.messages {
             let (icon, color) = if role == &self.config.user_name {
                 ("👤", ThemeColor::UserMessage.color())
@@ -220,24 +233,37 @@ impl App {
                 ("🤖", ThemeColor::AiMessage.color())
             };
 
-            let header = Line::from(vec![
+            message_elements.push(Line::from(vec![
                 Span::styled(format!("{} ", icon), Style::default()),
                 Span::styled(role, Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 Span::styled(":", Style::default().fg(ThemeColor::HeaderPunctuation.color())),
-            ]);
+            ]));
 
-            let body = Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(msg, Style::default().fg(ThemeColor::MessageBody.color())),
-            ]);
-
-            list_items.push(ListItem::new(vec![header, body, Line::from("")]));
+            let body_lines = wrap_text(msg, msg_width);
+            for line in body_lines {
+                message_elements.push(Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(line, Style::default().fg(ThemeColor::MessageBody.color())),
+                ]));
+            }
+            message_elements.push(Line::from(""));
         }
 
-        let messages_list = List::new(list_items).block(Block::default().borders(Borders::NONE));
-        f.render_widget(messages_list, chunks[0]);
+        // Auto-scroll to show latest messages
+        let total_lines = message_elements.len();
+        let area_height = chunks[0].height as usize;
+        let scroll = if total_lines > area_height {
+            (total_lines - area_height) as u16
+        } else {
+            0
+        };
 
-        // Status Divider
+        let messages_para = Paragraph::new(message_elements)
+            .block(Block::default().borders(Borders::NONE))
+            .scroll((scroll, 0));
+        f.render_widget(messages_para, chunks[0]);
+
+        // -- Status Divider --
         let usage_color = if self.config.tokens_used > self.config.token_limit * 8 / 10 {
             ThemeColor::TokensCritical.color()
         } else if self.config.tokens_used > self.config.token_limit / 2 {
@@ -273,24 +299,33 @@ impl App {
             .block(Block::default());
         f.render_widget(divider, chunks[1]);
 
-        // Input / Tool Confirmation
+        // -- Input / Tool Confirmation --
         match &self.state {
             AppState::Normal => {
                 let input_widget = Paragraph::new(self.input.value())
                     .style(Style::default().fg(ThemeColor::InputText.color()))
+                    .wrap(Wrap { trim: false })
                     .block(Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(ThemeColor::InputBorder.color()))
                         .title(Span::styled(" ✉️ Message ", Style::default().fg(ThemeColor::InputBorder.color()).add_modifier(Modifier::BOLD))));
                 f.render_widget(input_widget, chunks[2]);
-                f.set_cursor_position(ratatui::layout::Position::new(
-                    chunks[2].x + self.input.cursor() as u16 + 1,
-                    chunks[2].y + 1,
-                ));
+
+                // Calculate wrapped cursor position
+                let text_width = chunks[2].width.saturating_sub(2) as usize;
+                let cursor_pos = self.input.cursor();
+                if text_width > 0 {
+                    let cursor_row = cursor_pos / text_width;
+                    let cursor_col = cursor_pos % text_width;
+                    f.set_cursor_position(ratatui::layout::Position::new(
+                        chunks[2].x + 1 + cursor_col as u16,
+                        chunks[2].y + 1 + cursor_row as u16,
+                    ));
+                }
             }
             AppState::WaitingForTool { ai_name, cmd, .. } => {
                 let accent = ThemeColor::ToolAccent.color();
-                let content = vec![
+                let mut content = vec![
                     Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(
@@ -299,19 +334,27 @@ impl App {
                         ),
                     ]),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("  $ ", Style::default().fg(ThemeColor::ToolCommandPrefix.color()).add_modifier(Modifier::BOLD)),
-                        Span::styled(cmd.as_str(), Style::default().fg(ThemeColor::ToolCommand.color()).add_modifier(Modifier::BOLD)),
-                    ]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("  Press ", Style::default().fg(ThemeColor::HintText.color())),
-                        Span::styled("Y / Enter", Style::default().fg(ThemeColor::AllowAction.color()).add_modifier(Modifier::BOLD)),
-                        Span::styled(" to allow, ", Style::default().fg(ThemeColor::HintText.color())),
-                        Span::styled("any other key", Style::default().fg(ThemeColor::DenyAction.color()).add_modifier(Modifier::BOLD)),
-                        Span::styled(" to deny.", Style::default().fg(ThemeColor::HintText.color())),
-                    ]),
                 ];
+
+                let cmd_width = chunks[2].width.saturating_sub(6) as usize;
+                let cmd_lines = wrap_text(cmd, cmd_width);
+                for (i, line) in cmd_lines.iter().enumerate() {
+                    let prefix = if i == 0 { "  $ " } else { "    " };
+                    content.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(ThemeColor::ToolCommandPrefix.color()).add_modifier(Modifier::BOLD)),
+                        Span::styled(line, Style::default().fg(ThemeColor::ToolCommand.color()).add_modifier(Modifier::BOLD)),
+                    ]));
+                }
+
+                content.push(Line::from(""));
+                content.push(Line::from(vec![
+                    Span::styled("  Press ", Style::default().fg(ThemeColor::HintText.color())),
+                    Span::styled("Y / Enter", Style::default().fg(ThemeColor::AllowAction.color()).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to allow, ", Style::default().fg(ThemeColor::HintText.color())),
+                    Span::styled("any other key", Style::default().fg(ThemeColor::DenyAction.color()).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to deny.", Style::default().fg(ThemeColor::HintText.color())),
+                ]));
+
                 let prompt_widget = Paragraph::new(content)
                     .block(Block::default()
                         .borders(Borders::ALL)
